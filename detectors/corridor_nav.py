@@ -1,13 +1,16 @@
+# corridor_nav.py
 import cv2
 import numpy as np
 
 class CorridorNavigator:
+    __slots__ = ('edge_threshold', 'center_tolerance')
+    
     def __init__(self, edge_threshold, center_tolerance):
         self.edge_threshold = edge_threshold
         self.center_tolerance = center_tolerance
     
     def detect(self, frame):
-        gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)  # RGB input
+        gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
         edges = cv2.Canny(gray, 50, 150)
         h, w = frame.shape[:2]
         roi = edges[h//3:2*h//3, :]

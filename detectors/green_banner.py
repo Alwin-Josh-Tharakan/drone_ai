@@ -1,18 +1,21 @@
+# green_banner.py
 import cv2
 import numpy as np
 
 class GreenBannerDetector:
+    __slots__ = ('hsv_lower', 'hsv_upper', 'min_area', 'kernel')
+    
     def __init__(self, hsv_lower, hsv_upper, min_area):
         self.hsv_lower = np.array(hsv_lower)
         self.hsv_upper = np.array(hsv_upper)
         self.min_area = min_area
+        self.kernel = np.ones((5,5), np.uint8)
     
     def detect(self, frame):
-        hsv = cv2.cvtColor(frame, cv2.COLOR_RGB2HSV)  # RGB input
+        hsv = cv2.cvtColor(frame, cv2.COLOR_RGB2HSV)
         mask = cv2.inRange(hsv, self.hsv_lower, self.hsv_upper)
-        kernel = np.ones((5,5), np.uint8)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self.kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, self.kernel)
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
         results = []

@@ -1,21 +1,24 @@
+# red_zone.py
 import cv2
 import numpy as np
 
 class RedZoneDetector:
+    __slots__ = ('hsv_lower1', 'hsv_upper1', 'hsv_lower2', 'hsv_upper2', 'min_area', 'kernel')
+    
     def __init__(self, hsv_lower1, hsv_upper1, hsv_lower2, hsv_upper2, min_area):
         self.hsv_lower1 = np.array(hsv_lower1)
         self.hsv_upper1 = np.array(hsv_upper1)
         self.hsv_lower2 = np.array(hsv_lower2)
         self.hsv_upper2 = np.array(hsv_upper2)
         self.min_area = min_area
+        self.kernel = np.ones((5,5), np.uint8)
     
     def detect(self, frame):
-        hsv = cv2.cvtColor(frame, cv2.COLOR_RGB2HSV)  # RGB input
+        hsv = cv2.cvtColor(frame, cv2.COLOR_RGB2HSV)
         mask1 = cv2.inRange(hsv, self.hsv_lower1, self.hsv_upper1)
         mask2 = cv2.inRange(hsv, self.hsv_lower2, self.hsv_upper2)
         mask = cv2.bitwise_or(mask1, mask2)
-        kernel = np.ones((5,5), np.uint8)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self.kernel)
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
         results = []
