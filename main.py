@@ -43,6 +43,15 @@ PRINCIPAL_POINT = (CAMERA_MATRIX[0, 2], CAMERA_MATRIX[1, 2])
 # SECTION 2 — CAMERA INITIALIZATION (SINOSEE USB, MJPG backend)
 # ═══════════════════════════════════════════════════════════════
 
+def _open_backend(camera_id: int, backend) -> cv2.VideoCapture:
+    """Open one backend; returns cap only if it actually opened."""
+    cap = cv2.VideoCapture(camera_id, backend)
+    if cap.isOpened():
+        return cap
+    cap.release()
+    return None
+
+
 def initialize_camera(camera_id: int = 1,
                       width: int = 1600,
                       height: int = 1300) -> cv2.VideoCapture:
@@ -50,22 +59,64 @@ def initialize_camera(camera_id: int = 1,
     Initializes and configures the SINOSEE global shutter USB camera
     with optimal settings for detection / calibration / capture.
 
+    Robustness notes (laptop testing):
+      * On Linux, a webcam is often /dev/video0 (or another index) — the
+        hardcoded index is tried FIRST, then all other indices 0..9.
+      * Some builds/devices reject CAP_V4L2 or CAP_DSHOW outright, so we
+        fall back to the OS default backend before giving up.
+
     Args:
-        camera_id (int): OpenCV camera index (0 = default, 1 = external USB, ...)
+        camera_id (int): Preferred OpenCV camera index
+                         (pass -1 to skip straight to auto-detect)
         width (int): Desired frame width
         height (int): Desired frame height
 
     Returns:
         cv2.VideoCapture: Configured camera object
+
+    Raises:
+        RuntimeError: If no working camera could be opened.
     """
-    # 1. Choose backend based on OS (DirectShow for Windows, V4L2 for Linux)
-    backend = cv2.CAP_DSHOW if os.name == 'nt' else cv2.CAP_V4L2
+    # 1. Choose backend based on OS (DirectShow for Windows, V4L2 for Linux),
+    #    with the OS-default backend as fallback.
+    if os.name == 'nt':
+        backends = [cv2.CAP_DSHOW, cv2.CAP_ANY]
+    else:
+        backends = [cv2.CAP_V4L2, cv2.CAP_ANY]
 
-    # 2. Initialize capture
-    cap = cv2.VideoCapture(camera_id, backend)
+    # 2. Candidate indices: preferred first, then scan 0..9 (skip duplicates).
+    preferred = [] if camera_id is None or camera_id < 0 else [camera_id]
+    candidates = preferred + [i for i in range(10) if i not in preferred]
 
-    if not cap.isOpened():
-        raise RuntimeError(f"Error: Could not open camera with ID {camera_id}.")
+    cap = None
+    used_idx = None
+    for idx in candidates:
+        for backend in backends:
+            cap = _open_backend(idx, backend)
+            if cap is not None:
+                used_idx = idx
+                break
+        if cap is not None:
+            if idx != camera_id:
+                print(f"[main] Camera at requested ID {camera_id} unavailable — "
+                      f"opened index {idx} instead. "
+                      f"Set config.CAMERA_ID = {idx} to make this permanent.")
+            break
+        cap = None
+
+    if cap is None:
+        _bname = {cv2.CAP_DSHOW: 'DSHOW', cv2.CAP_V4L2: 'V4L2',
+                  getattr(cv2, 'CAP_ANY', -99): 'ANY'}
+        _backends_str = "/".join(_bname.get(b, str(b)) for b in backends)
+        raise RuntimeError(
+            f"Error: Could not open any camera (tried IDs "
+            f"{', '.join(map(str, candidates))} with backends {_backends_str}).\n"
+            f"Checklist:\n"
+            f"  1) ls /dev/video*   — is the module enumerated?\n"
+            f"  2) v4l2-ctl --list-devices\n"
+            f"  3) sudo usermod -aG video $USER   (then log out/in)\n"
+            f"  4) Is another app (e.g. the main.py self-test window) still holding the camera?")
+    camera_id = used_idx
 
     # 3. Set FourCC to MJPG (required for high-resolution/high-FPS over USB)
     fourcc = cv2.VideoWriter_fourcc(*'MJPG')
@@ -107,16 +158,37 @@ def get_undistort_maps(width: int, height: int):
     Precompute rectify maps once for a fixed resolution, then reuse
     with cv2.remap() per-frame (much faster than cv2.undistort in a loop).
 
-    Usage:
-        map1, map2 = get_undistort_maps(1600, 1300)
-        clean = cv2.remap(raw, map1, map2, cv2.INTER_LINEAR)
+    IMPORTANT: the intrinsics above were calibrated at 1600x1300. If the
+    camera negotiated a different resolution (common on laptops where the
+    full sensor mode may be unavailable), the matrix is scaled accordingly
+    so undistortion stays valid; if no calibration applies to the actual
+    size, callers should treat maps as identity (no-op remap).
+
+    Returns:
+        (map1, map2, new_matrix, roi) — same order as before, but also
+        usable as `map1, map2 = get_undistort_maps(w, h)[:2]`.
     """
+    cal_w = float(CAMERA_MATRIX[0, 2] * 2.0)   # ~2*cx ≈ calibrated width
+    cal_h = float(CAMERA_MATRIX[1, 2] * 2.0)   # ~2*cy ≈ calibrated height
+    sx, sy = width / cal_w, height / cal_h
+
+    if abs(sx - 1.0) > 0.05 or abs(sy - 1.0) > 0.05:
+        print(f"[main] WARNING: resolution {width}x{height} differs from "
+              f"calibration (~{int(cal_w)}x{int(cal_h)}); scaling intrinsics "
+              f"by ({sx:.2f}, {sy:.2f}). Re-calibrate at this resolution "
+              f"for best accuracy.")
+        K = CAMERA_MATRIX.copy()
+        K[0, 0] *= sx; K[0, 2] *= sx
+        K[1, 1] *= sy; K[1, 2] *= sy
+    else:
+        K = CAMERA_MATRIX
+
     new_matrix, roi = cv2.getOptimalNewCameraMatrix(
-        CAMERA_MATRIX, DIST_COEFFS, (width, height), alpha=1,
+        K, DIST_COEFFS, (width, height), alpha=1,
         newImgSize=(width, height)
     )
     map1, map2 = cv2.initUndistortRectifyMap(
-        CAMERA_MATRIX, DIST_COEFFS, None, new_matrix,
+        K, DIST_COEFFS, None, new_matrix,
         (width, height), cv2.CV_32FC1
     )
     return map1, map2, new_matrix, roi
@@ -141,21 +213,21 @@ def pixel_to_bearing(x: float, y: float, frame_size=(1600, 1300)):
 # ═══════════════════════════════════════════════════════════════
 
 def find_camera(width: int = 1600, height: int = 1300):
-    """Try camera indices from 4 down to 0 until one works."""
-    for idx in range(4, -1, -1):
-        try:
-            cap = initialize_camera(camera_id=idx, width=width, height=height)
-            print(f"[OK] Camera found and initialized at index {idx}")
-            return cap, idx
-        except RuntimeError:
-            print(f"[..] No camera at index {idx}, trying next...")
-    raise RuntimeError("No USB camera found on indices 4 down to 0. Check cable/permissions.")
+    """
+    Auto-detect a working camera. initialize_camera() already scans all
+    indices (preferred first, then 0..9) and both backends, so this is a
+    thin wrapper kept for API compatibility.
+
+    Returns:
+        cv2.VideoCapture
+    """
+    return initialize_camera(camera_id=-1, width=width, height=height)
 
 
 if __name__ == "__main__":
     try:
-        # Use the auto-detect loop instead of hardcoded index 1
-        cap, cam_id = find_camera(width=1600, height=1300)
+        # Auto-detect: tries every index/backend until one streams
+        cap = find_camera(width=1600, height=1300)
         
         w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))

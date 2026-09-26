@@ -93,6 +93,8 @@ def main():
     # Removed --camera argument since we now auto-scan 4 down to 0
     ap.add_argument("--no-undistort", action="store_true", help="skip lens undistortion")
     ap.add_argument("--selftest", action="store_true", help="offline test, no camera")
+    ap.add_argument("--camera", type=int, default=None,
+                    help="preferred camera index (default: auto-scan all indices)")
     args = ap.parse_args()
 
     if args.selftest:
@@ -100,8 +102,9 @@ def main():
         return
 
     # ---- 1. Camera ----
-    # Automatically loops from 4 down to 0 until a camera is found
-    cap, cam_id = find_camera()
+    # initialize_camera() now auto-scans indices/backends internally, so a
+    # single call with the CLI index (or -1 to skip straight to scanning) works.
+    cap = initialize_camera(camera_id=args.camera if args.camera is not None else -1)
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
