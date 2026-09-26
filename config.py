@@ -60,7 +60,7 @@ PLAN_COLOR_PENDING     = (180, 180, 180)
 SAVE_FIRST_QR     = True
 SAVE_TEMPLATE_QR  = True
 SAVE_CANDIDATES   = True
-CANDIDATE_THROTTLE_SEC = 2.0        # min seconds between candidate saves
+CANDIDATE_THROTTLE_SEC = 1.0        # min seconds between candidate saves
 
 # ── Visual debug colors (BGR) ─────────────────────────────────
 COLOR_QR           = (255,   0, 255)
