@@ -23,18 +23,16 @@ from detectors.qr_detector import QRDetector
 from detectors.template_matcher import TemplateMatcher
 
 
-def find_camera(preferred: int):
-    """Try preferred index first, then fall back to scanning 0..3."""
-    order = [preferred] + [i for i in range(4) if i != preferred]
-    for idx in order:
+def find_camera():
+    """Try camera indices from 4 down to 0."""
+    for idx in range(4, -1, -1):
         try:
             cap = initialize_camera(camera_id=idx)
             print(f"[OK] Camera found at index {idx}")
             return cap, idx
         except RuntimeError:
             print(f"[..] No camera at index {idx}, trying next...")
-    raise RuntimeError("No USB camera found on indices 0-3. Check cable/permissions.")
-
+    raise RuntimeError("No USB camera found on indices 4 down to 0. Check cable/permissions.")
 
 def render_qr_png(data: str) -> np.ndarray:
     """Render *data* as a crisp black/white QR image (numpy array)."""
@@ -92,7 +90,7 @@ def selftest():
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--camera", type=int, default=1, help="preferred camera index")
+    # Removed --camera argument since we now auto-scan 4 down to 0
     ap.add_argument("--no-undistort", action="store_true", help="skip lens undistortion")
     ap.add_argument("--selftest", action="store_true", help="offline test, no camera")
     args = ap.parse_args()
@@ -102,7 +100,8 @@ def main():
         return
 
     # ---- 1. Camera ----
-    cap, cam_id = find_camera(args.camera)
+    # Automatically loops from 4 down to 0 until a camera is found
+    cap, cam_id = find_camera()
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 

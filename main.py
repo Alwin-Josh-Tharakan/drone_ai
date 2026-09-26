@@ -137,12 +137,26 @@ def pixel_to_bearing(x: float, y: float, frame_size=(1600, 1300)):
 
 
 # ═══════════════════════════════════════════════════════════════
-# Example Usage / Self-test
+# SECTION 4 — AUTO-DETECT CAMERA & SELF-TEST
 # ═══════════════════════════════════════════════════════════════
+
+def find_camera(width: int = 1600, height: int = 1300):
+    """Try camera indices from 4 down to 0 until one works."""
+    for idx in range(4, -1, -1):
+        try:
+            cap = initialize_camera(camera_id=idx, width=width, height=height)
+            print(f"[OK] Camera found and initialized at index {idx}")
+            return cap, idx
+        except RuntimeError:
+            print(f"[..] No camera at index {idx}, trying next...")
+    raise RuntimeError("No USB camera found on indices 4 down to 0. Check cable/permissions.")
+
 
 if __name__ == "__main__":
     try:
-        cap = initialize_camera(camera_id=1, width=1600, height=1300)
+        # Use the auto-detect loop instead of hardcoded index 1
+        cap, cam_id = find_camera(width=1600, height=1300)
+        
         w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         map1, map2, _, _ = get_undistort_maps(w, h)
@@ -162,7 +176,7 @@ if __name__ == "__main__":
                 break
 
     except RuntimeError as e:
-        print(e)
+        print(f"\n[ERROR] {e}")
     finally:
         if 'cap' in locals() and cap.isOpened():
             cap.release()
