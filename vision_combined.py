@@ -76,14 +76,25 @@ out = OutputManager(
     candidate_throttle_sec = config.CANDIDATE_THROTTLE_SEC)
 
 # ── Camera (USB SINOSEE global-shutter module) ───────────────────────────────
-cap = initialize_camera(camera_id=config.CAMERA_ID,
-                        width=config.CAMERA_WIDTH,
-                        height=config.CAMERA_HEIGHT)
+def find_camera(width: int, height: int):
+    """Try camera indices from 4 down to 0 until one works."""
+    for idx in range(4, -1, -1):  # <-- This loops DOWN: 4, 3, 2, 1, 0
+        try:
+            cap = initialize_camera(camera_id=idx, width=width, height=height)
+            print(f"[OK] Camera found and initialized at index {idx}")
+            return cap, idx
+        except RuntimeError:
+            print(f"[..] No camera at index {idx}, trying next...")
+    raise RuntimeError("No USB camera found on indices 4 down to 0. Check cable/permissions.")
+
+# Use the loop instead of config.CAMERA_ID
+cap, cam_id = find_camera(width=config.CAMERA_WIDTH, height=config.CAMERA_HEIGHT)
 ACTUAL_W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
 ACTUAL_H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
 # Undistortion maps for the ACTUAL negotiated resolution (cached — remap is
 # ~10x faster than per-frame cv2.undistort)
-_map1, _map2 = get_undistort_maps(ACTUAL_W, ACTUAL_H)
+_map1, _map2, _, _ = get_undistort_maps(ACTUAL_W, ACTUAL_H)
 
 # ── Video writer ──────────────────────────────────────────────────────────────
 video_path = os.path.join(out.run_dir, f"mission_{timestamp}.avi")
