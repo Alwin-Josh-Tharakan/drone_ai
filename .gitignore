@@ -1,6 +1,7 @@
-# Compiled Python bytecode
+# Python compiled files
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
 
-# Output artifacts (generated images)
+# Output directory (logs and video artifacts)
 output/
