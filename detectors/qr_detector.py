@@ -247,6 +247,9 @@ class QRDetector:
     # ──────────────────────────────────────────────────────────────────────
 
     def draw(self, frame: np.ndarray, detections: list) -> None:
+        """Full visual aids: bounding box + corner brackets + center dot,
+        payload label, match status/confidence and deviation cues."""
+        fcx, fcy = frame.shape[1] // 2, frame.shape[0] // 2
         for entry in detections:
             data, (cx, cy), rect, raw_crop, binary_crop = entry
             rx, ry, rw, rh = rect
@@ -256,17 +259,38 @@ class QRDetector:
                 box_color = (0, 255, 0) if found else (255, 0, 255)
                 status = f"CONF:{conf:.2f}"
             else:
+                found = False
                 box_color = (255, 0, 255)
                 status = "[CROP OK]" if raw_crop is not None else "[NO CROP]"
 
+            # Bounding box + L-shaped corner brackets
             cv2.rectangle(frame, (rx, ry), (rx + rw, ry + rh), box_color, 2)
+            blen = max(8, min(rw, rh) // 5)
+            for (px, py), (sx, sy) in (((rx, ry), (1, 1)), ((rx + rw, ry), (-1, 1)),
+                                        ((rx, ry + rh), (1, -1)),
+                                        ((rx + rw, ry + rh), (-1, -1))):
+                cv2.line(frame, (px, py), (px + sx * blen, py), box_color, 3)
+                cv2.line(frame, (px, py), (px, py + sy * blen), box_color, 3)
+
+            # Object center dot + crosshair arms
             cv2.circle(frame, (cx, cy), 5, box_color, -1)
+            cv2.line(frame, (cx - 12, cy), (cx + 12, cy), box_color, 1)
+            cv2.line(frame, (cx, cy - 12), (cx, cy + 12), box_color, 1)
+
+            # Offset line from frame center to detection center
+            cv2.line(frame, (fcx, fcy), (cx, cy), (255, 0, 0), 1)
 
             label = (data[:20] + "…") if len(data) > 20 else (data or "QR")
             cv2.putText(frame, f"QR: {label}", (rx, max(ry - 10, 10)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, box_color, 2)
             cv2.putText(frame, status, (rx, ry + rh + 18),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+
+            if found:
+                dev_x, dev_y = cx - fcx, cy - fcy
+                cv2.putText(frame, f"TARGET FOUND  dev=({dev_x:+d},{dev_y:+d})",
+                            (rx, max(ry - 32, 10)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
     # ──────────────────────────────────────────────────────────────────────
     # Internal helpers

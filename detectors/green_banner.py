@@ -31,6 +31,13 @@ class GreenBannerDetector:
         for (cx, cy), area in detections:
             s = 20
             cv2.rectangle(frame, (cx - s, cy - s), (cx + s, cy + s), (0, 255, 0), 2)
+            # corner brackets
+            cv2.line(frame, (cx - s, cy - s), (cx - s // 2, cy - s), (0, 255, 0), 3)
+            cv2.line(frame, (cx - s, cy - s), (cx - s, cy - s // 2), (0, 255, 0), 3)
+            cv2.line(frame, (cx + s, cy + s), (cx + s // 2, cy + s), (0, 255, 0), 3)
+            cv2.line(frame, (cx + s, cy + s), (cx + s, cy + s // 2), (0, 255, 0), 3)
             cv2.circle(frame, (cx, cy), 5, (0, 255, 0), -1)
             cv2.putText(frame, f"G:{int(area)}", (cx - s, cy - s - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            cv2.putText(frame, "BANNER", (cx - s, cy + s + 18),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 200, 0), 1)

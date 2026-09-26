@@ -29,13 +29,12 @@ WORKFLOW
 
 import cv2
 import numpy as np
-from picamera2 import Picamera2
-from libcamera import controls
 from datetime import datetime
 import os
 import logging
 
 import config
+from main                    import initialize_camera, get_undistort_maps
 from detectors.qr_detector       import QRDetector, TargetData
 from detectors.template_matcher  import TemplateMatcher, MatchResult
 from detectors.green_banner      import GreenBannerDetector
@@ -76,15 +75,15 @@ out = OutputManager(
     timestamp              = timestamp,
     candidate_throttle_sec = config.CANDIDATE_THROTTLE_SEC)
 
-# ── Camera ────────────────────────────────────────────────────────────────────
-picam2 = Picamera2()
-picam2.configure(picam2.create_preview_configuration(
-    main={"size": config.RESOLUTION, "format": "RGB888"}))
-picam2.start()
-picam2.set_controls({
-    "AfMode":    controls.AfModeEnum.Continuous,
-    "AwbEnable": True,
-})
+# ── Camera (USB SINOSEE global-shutter module) ───────────────────────────────
+cap = initialize_camera(camera_id=config.CAMERA_ID,
+                        width=config.CAMERA_WIDTH,
+                        height=config.CAMERA_HEIGHT)
+ACTUAL_W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+ACTUAL_H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+# Undistortion maps for the ACTUAL negotiated resolution (cached — remap is
+# ~10x faster than per-frame cv2.undistort)
+_map1, _map2 = get_undistort_maps(ACTUAL_W, ACTUAL_H)
 
 # ── Video writer ──────────────────────────────────────────────────────────────
 video_path = os.path.join(out.run_dir, f"mission_{timestamp}.avi")
@@ -133,7 +132,6 @@ nav = CorridorNavigator(config.CORRIDOR_TOLERANCE,
 mission = MissionController(
     target_qr       = "DROP_ZONE_A",
     match_threshold = config.MATCH_THRESHOLD)
-mission.set_qr_detector(qr)
 
 # ── Planner — crash-safe build ────────────────────────────────────────────────
 planner = None
@@ -157,7 +155,6 @@ else:
 FCX             = config.RESOLUTION[0] // 2
 FCY             = config.RESOLUTION[1] // 2
 frame_count     = 0
-qr_saved        = False        # legacy QRDetector.save_qr_data()
 template_loaded = False
 target_data: 'TargetData' = None
 match_result              = None
@@ -179,8 +176,12 @@ try:
         frame_count += 1
         now = datetime.now().strftime("%H:%M:%S.%f")
 
-        # ── Capture ───────────────────────────────────────────────────────────
-        frame_raw = picam2.capture_array()
+        # ── Capture (USB MJPG → BGR, undistorted via cached remap) ───────────
+        ok, frame_bgr = cap.read()
+        if not ok:
+            logger.warning("[MAIN] cap.read() failed — skipping frame")
+            continue
+        frame_raw = cv2.remap(frame_bgr, _map1, _map2, cv2.INTER_LINEAR)
         frame     = frame_raw.copy()
 
         # ── Detection ─────────────────────────────────────────────────────────
@@ -195,7 +196,8 @@ try:
         # ── STEP 1 — Load template from FIRST QR (once) ───────────────────────
         if qr_results and not template_loaded:
             first_payload = qr_results[0][0]
-            first_crop    = qr_results[0][3]
+            first_crop    = cv2.cvtColor(qr_results[0][3], cv2.COLOR_RGB2BGR) \
+                if qr_results[0][3] is not None else None
 
             # Save first QR ALWAYS (even if decoding fails later)
             if config.SAVE_FIRST_QR:
@@ -212,8 +214,6 @@ try:
                 target_data     = extracted
                 template_loaded = True
                 start_qr_data   = first_payload
-
-                mission.set_target_data(target_data)
 
                 if config.SAVE_TEMPLATE_QR:
                     out.save_template(
@@ -240,14 +240,18 @@ try:
             best_entry = None
 
             for entry in qr_results:
-                data_string, (cxq, cyq), rect, raw_crop, binary_crop, is_sharp = entry
+                data_string, (cxq, cyq), rect, raw_crop, binary_crop = entry
 
                 if data_string == start_qr_data:
                     continue
 
-                if not is_sharp:
-                    skipped_blurry += 1
-                    continue
+                # Blur guard on the QR crop (Laplacian variance)
+                if raw_crop is not None:
+                    _g = cv2.cvtColor(raw_crop, cv2.COLOR_BGR2GRAY) \
+                        if raw_crop.ndim == 3 else raw_crop
+                    if cv2.Laplacian(_g, cv2.CV_64F).var() < config.SHARPNESS_THRESHOLD:
+                        skipped_blurry += 1
+                        continue
 
                 found, conf = qr.match_against_target(
                     binary_crop, threshold=config.MATCH_THRESHOLD)
@@ -258,7 +262,8 @@ try:
                 # Save candidate (throttled)
                 if config.SAVE_CANDIDATES:
                     out.save_candidate(
-                        raw_crop, binary_crop,
+                        cv2.cvtColor(raw_crop, cv2.COLOR_RGB2BGR),
+                        binary_crop,
                         frame_index = frame_count,
                         confidence  = conf,
                         matched     = found,
@@ -282,7 +287,7 @@ try:
                              and all(m[0] for m in match_history))
                 avg_conf  = sum(m[1] for m in match_history) / len(match_history)
 
-                _, (cxq, cyq), _, _, _, _ = best_entry
+                _, (cxq, cyq), _, _, _ = best_entry
                 match_result = MatchResult(
                     match_found = confirmed,
                     confidence  = round(avg_conf, 4),
@@ -323,14 +328,8 @@ try:
             qr_results, green_results, red_results, deviation)
         debug_info = mission.get_debug_info()
 
-        # ── Legacy QR data save ───────────────────────────────────────────────
-        if qr_results and not qr_saved:
-            data_string, _, rect, raw_crop, _, _ = qr_results[0]
-            if qr.save_qr_data(data_string, raw_crop):
-                qr_saved = True
-
         # ── Edge overlay ──────────────────────────────────────────────────────
-        gray  = cv2.cvtColor(frame_raw, cv2.COLOR_RGB2GRAY)
+        gray  = cv2.cvtColor(frame_raw, cv2.COLOR_BGR2GRAY)
         edges = cv2.Canny(gray, 50, 150)
         _edge_overlay[:] = 0
         _edge_overlay[:, :, 0] = edges
@@ -424,9 +423,9 @@ try:
                         config.PLAN_COLOR_PATH, 1)
 
         if debug_info.get('in_red_zone', False):
-            cv2.rectangle(frame, (5, 250), (635, 290), (0, 0, 220), -1)
+            cv2.rectangle(frame, (5, 250), (ACTUAL_W - 5, 300), (0, 0, 220), -1)
             cv2.putText(frame, "!!! RED ZONE !!!",
-                        (170, 278),
+                        (ACTUAL_W // 2 - 140, 286),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
 
         cv2.putText(frame, f"FRAME: {frame_count}",
@@ -522,7 +521,7 @@ except Exception as e:
     logger.exception(f"Main loop error: {e}")
 
 finally:
-    picam2.stop()
+    cap.release()
     writer.release()
 
     # Persist plan
