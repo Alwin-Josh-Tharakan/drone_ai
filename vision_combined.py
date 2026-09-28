@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-vision_combined.py — QR-ONLY PHASE harness.
+vision_combined.py — QR-ONLY PHASE harness (debugged).
 Active: camera init → undistort → QRPipeline (detect + template + match) → HUD/recording.
-DISABLED THIS PHASE (commented): planner, green banner, red zone, corridor nav,
-mission logic, edge overlay. Restore from git history when needed.
+DISABLED THIS PHASE: planner, green banner, red zone, corridor nav, mission
+logic, edge overlay (restore from git history when needed).
 """
 import cv2
 import numpy as np
@@ -12,16 +12,9 @@ import os
 import logging
 
 import config
-from main import initialize_camera, get_undistort_maps
+from main import get_undistort_maps
 from qr_module import QRPipeline
 from output_manager import OutputManager
-
-# ── [DISABLED] planner / other detectors / mission logic ─────────────────────
-# from detectors.green_banner import GreenBannerDetector
-# from detectors.red_zone      import RedZoneDetector
-# from detectors.corridor_nav  import CorridorNavigator
-# from mission_logic            import MissionController
-# from planning.search_planner  import build_planner, draw_path, save_plan
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -36,38 +29,34 @@ out = OutputManager(output_root=config.OUTPUT_DIR,
                     timestamp=timestamp,
                     candidate_throttle_sec=config.CANDIDATE_THROTTLE_SEC)
 
+# ── Camera: hardcoded to the TSTC USB camera (/dev/video0) ───────────────────
+CAMERA_INDEX = 0   # from: v4l2-ctl --list-devices
 
-# ── Camera: STRICT index loop 4→0 (no silent internal fallback) ──────────────
-# ── Camera: STRICT index loop 4→0 (no silent internal fallback) ──────────────
-# ── Camera: Hardcoded to the TSTC USB Camera ──────────────────────────────────
+
 def find_camera(width: int, height: int):
-    """Forces OpenCV to use the TSTC USB camera at index 2."""
-    REAL_INDEX = 2  
-    
-    print(f"[..] Forcing camera to index {REAL_INDEX} (TSTC USB20)...")
-    cap = cv2.VideoCapture(REAL_INDEX, cv2.CAP_V4L2)
-    
+    print(f"[..] Opening camera index {CAMERA_INDEX} (TSTC USB20)...")
+    cap = cv2.VideoCapture(CAMERA_INDEX, cv2.CAP_V4L2)
     if not cap.isOpened():
-        raise RuntimeError(f"Failed to open camera at index {REAL_INDEX}. Is it unplugged?")
-        
-    # Configure camera settings
-    fourcc = cv2.VideoWriter_fourcc(*'MJPG')
-    cap.set(cv2.CAP_PROP_FOURCC, fourcc)
+        raise RuntimeError(f"Failed to open camera at index {CAMERA_INDEX}. Unplugged?")
+
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
     cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
     cap.set(cv2.CAP_PROP_AUTO_WB, 1)
-    
-    # Verify it can actually read frames
+    # Drone-ready (uncomment for flight): manual short shutter freezes vibration blur
+    # cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
+    # cap.set(cv2.CAP_PROP_EXPOSURE, 40)      # 40 = 4 ms ≈ 1/250 s (100µs units)
+
     ok, _ = cap.read()
     if not ok:
         cap.release()
-        raise RuntimeError(f"Index {REAL_INDEX} opened but cannot read frames.")
-        
-    actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    print(f"[OK] TSTC USB Camera opened at index {REAL_INDEX} ({actual_w}x{actual_h})")
-    return cap, REAL_INDEX
+        raise RuntimeError(f"Index {CAMERA_INDEX} opened but cannot read frames.")
+
+    aw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    ah = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    print(f"[OK] TSTC USB Camera opened at index {CAMERA_INDEX} ({aw}x{ah})")
+    return cap, CAMERA_INDEX
 
 
 cap, cam_id = find_camera(config.CAMERA_WIDTH, config.CAMERA_HEIGHT)
@@ -91,13 +80,12 @@ pipe = QRPipeline(
     match_threshold=config.MATCH_THRESHOLD,
     sharpness_threshold=config.SHARPNESS_THRESHOLD,
     frame_size=(ACTUAL_W, ACTUAL_H),
-    smoothing_window=3,
+    smoothing_window=getattr(config, "CONFIRM_WINDOW", 5),
+    confirm_min_hits=getattr(config, "CONFIRM_MIN_HITS", 3),
     output_dir=out.run_dir,
     output_manager=out,
     clahe_limit=config.CLAHE_LIMIT,
     clahe_tile_size=config.CLAHE_TILE_SIZE)
-
-# ── [DISABLED] green/red/corridor/mission/planner construction ───────────────
 
 frame_count = 0
 try:
@@ -114,30 +102,13 @@ try:
 
         # ── QR pipeline: detect → template load → match ──────────────────
         res = pipe.process_frame(frame_raw)
-        pipe.draw(frame, res)
+        pipe.draw(frame, res)          # module draws the ONLY HUD
 
-        # ── [DISABLED] edge overlay / green / red / corridor / mission / planner draws ──
-
-        # ── Minimal HUD ──────────────────────────────────────────────────
-        tmpl_text  = "LOADED" if res.template_loaded else "WAITING FOR START QR"
-        tmpl_color = (0, 255, 0) if res.template_loaded else (0, 165, 255)
-        cv2.putText(frame, f"TEMPLATE: {tmpl_text}", (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, tmpl_color, 2)
-        cv2.putText(frame, f"QR: {len(res.detections)}  CAND: {len(res.candidates)}",
-                    (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        if res.best is not None:
-            cc = (0, 255, 0) if res.best.matched else (0, 0, 255)
-            cv2.putText(frame,
-                        f"MATCH: {'YES' if res.best.matched else 'NO'}  "
-                        f"G:{res.best.grid_conf:.2f} M:{res.best.matcher_conf:.2f}",
-                        (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, cc, 2)
-        if res.confirmed:
-            cv2.putText(frame, f"CONFIRMED conf={res.confirmed_conf:.2f}",
-                        (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        # frame counter only (no duplicate HUD)
         cv2.putText(frame, f"FRAME: {frame_count}", (10, ACTUAL_H - 10),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, (180, 180, 180), 1)
 
-        # ── Logging ──────────────────────────────────────────────────────
+        # ── Logging ─────────────────────────────────────────────────────
         if frame_count % LOG_INTERVAL == 0:
             if res.detections:
                 for ds, (cxq, cyq), rect, raw_crop, _ in res.detections:

@@ -1,0 +1,18 @@
+=========================================
+  CAMERA CALIBRATION DATA (READABLE)
+=========================================
+
+Resolution: 1600 x 1200
+Global RMS Error: 0.2787 px
+
+--- Camera Matrix (3x3) ---
+[   983.8432      0.0000    820.4136 ]
+[     0.0000    983.7728    628.5018 ]
+[     0.0000      0.0000      1.0000 ]
+
+--- Distortion Coefficients (k1, k2, p1, p2, k3) ---
+k1 (Radial 1)   = -0.074344
+k2 (Radial 2)   = 0.081757
+p1 (Tangential) = 0.002323
+p2 (Tangential) = -0.000085
+k3 (Radial 3)   = -0.034161

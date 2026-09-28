@@ -36,7 +36,7 @@ MIN_RED_AREA         = 5000   # used by detectors/red_zone.py
 
 # ── Template matcher ─────────────────────────────────────────
 MATCH_THRESHOLD  = 0.75
-SHARPNESS_THRESHOLD = 100.0     # Laplacian variance below this = blurry candidate
+SHARPNESS_THRESHOLD = 25.0     # Laplacian variance below this = blurry candidate
 TEMPLATE_SIZE    = (128, 128)
 CLAHE_LIMIT      = 2.0
 CLAHE_TILE_SIZE  = (8, 8)
@@ -72,4 +72,6 @@ COLOR_TEXT         = (255, 255, 255)
 COLOR_FRAME_CENTER = (  0, 255, 255)
 COLOR_BBOX         = (255, 165,   0)
 COLOR_OBJ_CENTER   = (  0, 255,   0)
-COLOR_OFFSET_LINE  = (255,   0,   0)
+
+CONFIRM_WINDOW        = 5       # N frames in confirmation window
+CONFIRM_MIN_HITS      = 3       # M hits required → vibration tolerant

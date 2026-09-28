@@ -1,26 +1,22 @@
-# detectors/qr_detector.py
-#
-# QR detection + pure-visual template matching for the SINOSEE global-shutter
-# USB camera mission (optimized fork).
-#
-# Optimizations vs. the Picam3 baseline:
-#   * pyzbar runs on a downscaled grayscale copy of the (1600x1300) USB frame
-#     — decode coordinates are rescaled back to full-frame space. This cuts
-#     per-frame QR location cost by ~4-8x while keeping min-size filtering
-#     identical in original pixels.
-#   * Module-grid sampling is vectorised with cv2.resize INTER_AREA instead of
-#     a Python double loop over 29x29 cells.
-#   * Dead code removed (legacy save helper, redundant metadata log).
-#
-# WORKFLOW
-# --------
-# 1. STARTUP (once): load_target_from_qr_payload() decodes the base64 image
-#    embedded in the START QR, binarises it and stores the canonical template.
-# 2. PER FRAME: detect() uses pyzbar ONLY to LOCATE QR regions; decoded text
-#    is kept for HUD/logging but never used for verification.
-# 3. match_against_target(): samples candidate + template onto a 29x29 module
-#    grid across 4 rotations; confidence = best bit-agreement ratio.
+"""
+detectors/qr_detector.py
+QR detection + pure-visual template matching for the SINOSEE global-shutter
+USB camera mission (optimized fork).
 
+Debugged / hardened in this revision
+------------------------------------
+* detect() is now MULTI-PASS for printed / low-contrast sheets:
+    pass 1: downscaled gray           (fast path)
+    pass 2: full-res gray             (dense QRs that vanish at half-res)
+    pass 3: full-res CLAHE + unsharp  (every enhanced_every frames)
+    pass 4: full-res adaptive binary  (every enhanced_every frames)
+* New shared binarize_qr(): CLAHE -> global Otsu keeps modules SOLID at any
+  module size. The old fixed adaptiveThreshold(block=11) hollowed out modules
+  whenever a module was wider than ~11 px (close-up crops), which destroyed
+  grid + matcher scores (G~0.57 / M~0.27 on the TRUE target). Adaptive
+  threshold is now only a FALLBACK, with a module-scaled block size.
+* Module-grid sampling stays vectorised (integral image), bit-exact.
+"""
 import base64
 import binascii
 import logging
@@ -62,7 +58,6 @@ class QRDetector:
                  template_size: tuple = (128, 128),
                  grid_n: int = 29,
                  detect_scale: float = 0.5):
-
         self.min_size = min_size
         self.output_dir = output_dir
         self.template_size = template_size
@@ -79,6 +74,10 @@ class QRDetector:
         self._target_template: Optional[np.ndarray] = None
         self._target_raw: Optional[np.ndarray] = None
         self._start_qr_data: str = ""
+
+        # multi-pass decode support (dense / low-contrast printed QRs)
+        self.enhanced_every = 5     # contrast-boosted passes every 5th frame
+        self._tick = 0
 
     # ──────────────────────────────────────────────────────────────────────
     # Step 1 — Template loading (runs ONCE at startup)
@@ -157,55 +156,95 @@ class QRDetector:
         return self._start_qr_data
 
     # ──────────────────────────────────────────────────────────────────────
-    # Step 2 — Per-frame detection (pyzbar used ONLY to locate, not decode)
+    # Shared scale-aware binarisation (THE fix for hollow modules)
+    # ──────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _odd(n: int) -> int:
+        n = int(n)
+        return n + 1 if n % 2 == 0 else n
+
+    @staticmethod
+    def binarize_qr(gray: np.ndarray, clahe) -> np.ndarray:
+        """
+        CLAHE → global Otsu (ideal for printed QR under even light).
+        Otsu keeps modules SOLID at any module size. Only if the black
+        fraction is implausible (heavy shadow / gradient) fall back to
+        adaptive threshold with a MODULE-SCALED block (≈1.5 × module px) —
+        the old fixed block=11 hollowed out modules on close-up crops.
+        """
+        eq = clahe.apply(gray)
+        _, binary = cv2.threshold(eq, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        frac = float(np.count_nonzero(binary == 0)) / binary.size
+        if 0.15 < frac < 0.75:
+            return binary
+        module_px = max(3.0, min(gray.shape[0], gray.shape[1]) / 37.0)
+        block = min(99, max(11, QRDetector._odd(round(module_px * 1.5))))
+        return cv2.adaptiveThreshold(eq, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                     cv2.THRESH_BINARY, block, 2)
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Step 2 — Per-frame detection (MULTI-PASS decode)
     # ──────────────────────────────────────────────────────────────────────
 
     def detect(self, frame: np.ndarray) -> List[Tuple]:
         """
         Find QR-shaped regions in *frame* (undistorted USB capture).
-
+        Multi-pass decode for robustness on printed / low-contrast sheets:
+          pass 1: downscaled gray           (fast path)
+          pass 2: full-res gray             (dense QRs that vanish at half-res)
+          pass 3: full-res CLAHE + unsharp  (every enhanced_every frames)
+          pass 4: full-res adaptive binary  (every enhanced_every frames)
         Returns list of (data_string, (cx, cy), rect, raw_crop, binary_crop)
         with all coordinates in FULL-frame pixel space.
         """
         results = []
         h, w = frame.shape[:2]
+        gray = (cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                if frame.ndim == 3 else frame)
+        self._tick += 1
 
-        # Optimization: pyzbar on a downscaled grayscale copy (~4x faster on
-        # the 1600x1300 USB stream); scale rects back to full-frame coords.
-        s = self.detect_scale
-        if 0 < s < 1.0:
-            small = cv2.resize(frame, (int(w * s), int(h * s)), interpolation=cv2.INTER_AREA)
-        else:
-            small = frame
-        gray_small = (cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-                      if small.ndim == 3 else small)
-        inv_s = 1.0 / s if 0 < s < 1.0 else 1.0
+        s = self.detect_scale if 0 < self.detect_scale < 1.0 else 1.0
+        passes = []
+        if s < 1.0:
+            passes.append((cv2.resize(gray, (int(w * s), int(h * s)),
+                                      interpolation=cv2.INTER_AREA), 1.0 / s))
+        passes.append((gray, 1.0))
+        if self._tick % max(1, self.enhanced_every) == 0:
+            eq = self._clahe.apply(gray)
+            unsharp = cv2.addWeighted(
+                eq, 1.6, cv2.GaussianBlur(eq, (0, 0), 2.0), -0.6, 0)
+            passes.append((unsharp, 1.0))
+            passes.append((cv2.adaptiveThreshold(
+                eq, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                cv2.THRESH_BINARY, 31, 10), 1.0))
 
-        for obj in pyzbar_decode(gray_small):
+        objs, inv_s = [], 1.0
+        for img, inv in passes:
+            objs = pyzbar_decode(img)
+            if objs:
+                inv_s = inv
+                break
+
+        for obj in objs:
             data = obj.data.decode("utf-8", errors="replace") if obj.data else ""
             r = obj.rect
             rw = int(r.width * inv_s)
             rh = int(r.height * inv_s)
-
             if rw < self.min_size or rh < self.min_size:
                 continue
-
             rx = int(r.left * inv_s)
             ry = int(r.top * inv_s)
             cx = rx + rw // 2
             cy = ry + rh // 2
             rect = (rx, ry, rw, rh)
-
             raw_crop = self._crop_qr(frame, rect)
             if raw_crop is None:
                 continue
-
             binary_crop = self._preprocess_template(raw_crop, denoise=True)
             if binary_crop is None:
                 continue
-
             results.append((data, (cx, cy), rect, raw_crop, binary_crop))
-
         return results
 
     # ──────────────────────────────────────────────────────────────────────
@@ -263,21 +302,17 @@ class QRDetector:
                 box_color = (255, 0, 255)
                 status = "[CROP OK]" if raw_crop is not None else "[NO CROP]"
 
-            # Bounding box + L-shaped corner brackets
             cv2.rectangle(frame, (rx, ry), (rx + rw, ry + rh), box_color, 2)
             blen = max(8, min(rw, rh) // 5)
             for (px, py), (sx, sy) in (((rx, ry), (1, 1)), ((rx + rw, ry), (-1, 1)),
-                                        ((rx, ry + rh), (1, -1)),
-                                        ((rx + rw, ry + rh), (-1, -1))):
+                                       ((rx, ry + rh), (1, -1)),
+                                       ((rx + rw, ry + rh), (-1, -1))):
                 cv2.line(frame, (px, py), (px + sx * blen, py), box_color, 3)
                 cv2.line(frame, (px, py), (px, py + sy * blen), box_color, 3)
 
-            # Object center dot + crosshair arms
             cv2.circle(frame, (cx, cy), 5, box_color, -1)
             cv2.line(frame, (cx - 12, cy), (cx + 12, cy), box_color, 1)
             cv2.line(frame, (cx, cy - 12), (cx, cy + 12), box_color, 1)
-
-            # Offset line from frame center to detection center
             cv2.line(frame, (fcx, fcy), (cx, cy), (255, 0, 0), 1)
 
             label = (data[:20] + "…") if len(data) > 20 else (data or "QR")
@@ -285,7 +320,6 @@ class QRDetector:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, box_color, 2)
             cv2.putText(frame, status, (rx, ry + rh + 18),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
-
             if found:
                 dev_x, dev_y = cx - fcx, cy - fcy
                 cv2.putText(frame, f"TARGET FOUND  dev=({dev_x:+d},{dev_y:+d})",
@@ -308,7 +342,6 @@ class QRDetector:
         y_edges = (np.arange(grid_n + 1) * h // grid_n)
         x_edges = (np.arange(grid_n + 1) * w // grid_n)
 
-        # Integral image for O(1) per-cell mean
         ii = cv2.integral(binary.astype(np.float64))
         ys = ii[np.ix_(y_edges, x_edges)]
         cell_sum = ys[:-1, :-1] - ys[1:, :-1] - ys[:-1, 1:] + ys[1:, 1:]
@@ -358,17 +391,14 @@ class QRDetector:
         """
         Canonical QR → binary pipeline.
         CLEAN path (denoise=False): gray → Otsu → trim → resize → re-binarise
-        NOISY path (denoise=True):  gray → blur → CLAHE → adaptiveThresh → trim → resize
+        NOISY path (denoise=True):  gray → blur → binarize_qr → trim → resize
         """
         try:
             gray = (cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
                     if img.ndim == 3 else img.copy())
             if denoise:
                 gray = cv2.GaussianBlur(gray, (3, 3), 0)
-                eq = self._clahe.apply(gray)
-                binary = cv2.adaptiveThreshold(eq, 255,
-                                               cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                               cv2.THRESH_BINARY, 11, 2)
+                binary = self.binarize_qr(gray, self._clahe)
             else:
                 _, binary = cv2.threshold(gray, 0, 255,
                                           cv2.THRESH_BINARY + cv2.THRESH_OTSU)
@@ -377,7 +407,8 @@ class QRDetector:
             if trimmed is None or trimmed.size == 0:
                 trimmed = binary
 
-            resized = cv2.resize(trimmed, self.template_size, interpolation=cv2.INTER_AREA)
+            resized = cv2.resize(trimmed, self.template_size,
+                                 interpolation=cv2.INTER_AREA)
             _, clean = cv2.threshold(resized, 127, 255, cv2.THRESH_BINARY)
             return clean
         except Exception as e:

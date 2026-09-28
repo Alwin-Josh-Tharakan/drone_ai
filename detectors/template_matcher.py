@@ -1,32 +1,18 @@
 """
 detectors/template_matcher.py
-
 Adaptive Binary Template Verification — fixed pipeline (optimized fork for the
 SINOSEE global-shutter USB camera).
 
 Pipeline (candidate side)
 -------------------------
 Phase 1 — Illumination Normalization  (grayscale + CLAHE)
-Phase 2 — Robust Binarization         (adaptive Gaussian threshold)
+Phase 2 — Robust Binarization         (shared QRDetector.binarize_qr:
+                                         CLAHE → Otsu, module-scaled adaptive
+                                         fallback — keeps modules SOLID)
 Phase 3 — Spatial Normalization       (contour → minAreaRect → de-rotate → resize)
-Phase 4 — Similarity Score            (pixel similarity + NCC combined)
+Phase 4 — Similarity Score            (pixel similarity + NCC, best of 4 rotations)
 Phase 5 — Confidence Thresholding     (emit MatchResult)
-
-Optimizations vs. the Picam3 baseline:
-  * frame_size defaults to the USB capture resolution (1600x1300) so deviation
-    pixels map directly onto the main-loop undistorted frames; pass the actual
-    resolution returned by initialize_camera() for safety.
-  * findContours uses CHAIN_APPROX_NONE only where needed and a single
-    largest-contour pass (no full contour list retained).
-  * matchTemplate NCC computed on uint8 via TM_CCOEFF_NORMED's internal
-    normalisation — avoids two extra float32 allocations per candidate.
-  * Dead code / duplicated docstring notes removed.
-
-Template side uses the SAME Phase 1+2 via QRDetector._preprocess_template(),
-which shares CLAHE (clipLimit=2.0, tile 8x8) and adaptive-threshold parameters
-(block 11, C=2) with process_to_binary() below.
 """
-
 import logging
 from dataclasses import dataclass
 from typing import Optional, Tuple
@@ -53,7 +39,6 @@ class MatchResult:
 class TemplateMatcher:
     """
     Adaptive Binary Template Verification with Spatial Normalization.
-
     Outputs deviation_x/deviation_y consumed by the mission logic to align
     the drone before payload release.
     """
@@ -64,7 +49,6 @@ class TemplateMatcher:
                  clahe_limit: float = 2.0,
                  clahe_tile_size: tuple = (8, 8),
                  frame_size: tuple = (1600, 1300)):  # SINOSEE USB resolution
-
         self.match_threshold = match_threshold
         self.template_size = template_size
         self.frame_center = (frame_size[0] // 2, frame_size[1] // 2)
@@ -81,14 +65,13 @@ class TemplateMatcher:
         """
         Input : BGR or grayscale image (any size).
         Output: binary uint8 image, same size as input, values 0 or 255.
+        Uses the SAME scale-aware binariser as the candidate pipeline so
+        template and candidate are always compared apples-to-apples.
         """
         try:
             gray = (cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
                     if img.ndim == 3 else img.copy())
-            eq = self._clahe.apply(gray)
-            return cv2.adaptiveThreshold(eq, 255,
-                                         cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                         cv2.THRESH_BINARY, 11, 2)
+            return QRDetector.binarize_qr(gray, self._clahe)
         except Exception as e:
             logger.error(f"[MATCHER] process_to_binary: {e}")
             return None
@@ -205,19 +188,18 @@ class TemplateMatcher:
         x, y = max(0, x), max(0, y)
         w = min(w, rotated.shape[1] - x)
         h = min(h, rotated.shape[0] - y)
-
         if w < 8 or h < 8:
             return None, angle, tuple(map(int, center_local))
 
         cropped = rotated[y:y + h, x:x + w]
 
         # Trim quiet zone so both template and candidate contain ONLY modules
-        # (QRDetector's template pipeline trims before resizing — mirror it here).
         trimmed = QRDetector._trim_quiet_zone(cropped)
         if trimmed is None or trimmed.size == 0:
             trimmed = cropped
 
-        resized = cv2.resize(trimmed, self.template_size, interpolation=cv2.INTER_AREA)
+        resized = cv2.resize(trimmed, self.template_size,
+                             interpolation=cv2.INTER_AREA)
         _, normalised = cv2.threshold(resized, 127, 255, cv2.THRESH_BINARY)
         return normalised, angle, tuple(map(int, center_local))
 
@@ -237,12 +219,7 @@ class TemplateMatcher:
 
     def _combined_similarity(self, img_a: np.ndarray, img_b: np.ndarray) -> float:
         """Phase 4: pixel similarity (absdiff) + NCC, averaged.
-
-        Optimization: for a square QR the true orientation is one of 4
-        rotations, so we take the best score over rot90^k — this both fixes
-        90°-rotated candidates and avoids the heavier warpAffine de-rotation
-        on the common path.
-        """
+        Best score over rot90^k — fixes 90°-rotated candidates."""
         if img_a.shape != img_b.shape:
             img_b = cv2.resize(img_b, (img_a.shape[1], img_a.shape[0]),
                                interpolation=cv2.INTER_NEAREST)
@@ -253,12 +230,10 @@ class TemplateMatcher:
         for k in range(4):
             if k > 0:
                 a = np.rot90(a)
-            # Pixel similarity
             mismatch = np.count_nonzero(cv2.absdiff(a, img_b))
             pixel_sim = 1.0 - mismatch / a.size
-            # Normalised cross-correlation (both images same size → one value)
             ncc = max(0.0, float(cv2.matchTemplate(a, img_b,
-                                                    cv2.TM_CCOEFF_NORMED)[0, 0]))
+                                                   cv2.TM_CCOEFF_NORMED)[0, 0]))
             best = max(best, (pixel_sim + ncc) / 2.0)
 
         logger.debug(f"[MATCHER] combined={best:.3f}")
