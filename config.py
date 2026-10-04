@@ -1,12 +1,13 @@
 # config.py — Drone Mission Configuration
-# Raspberry Pi 4B optimized
+# USB camera fork: SINOSEE global-shutter module (replaces Picam3)
 
-# ── Hardware ──────────────────────────────────────────────────
-YOLO_MODEL = "/home/pigec/yolo/yolov8n.pt"
-OUTPUT_DIR = "/home/pigec/drone_mission/output"
-RESOLUTION = (640, 480)
-FPS = 30
-CONFIDENCE_THRESHOLD = 0.5
+# ── Hardware / Camera (USB — see main.initialize_camera) ──────
+CAMERA_ID       = 1          # V4L2 index of the USB module (/dev/videoN)
+CAMERA_WIDTH    = 1600
+CAMERA_HEIGHT   = 1300
+OUTPUT_DIR      = "./output"
+RESOLUTION      = (CAMERA_WIDTH, CAMERA_HEIGHT)   # used by writer/HUD/matcher
+FPS             = 30
 
 # ── Color detection HSV ranges ────────────────────────────────
 GREEN_HSV_LOWER = (40, 40, 40)
@@ -26,30 +27,21 @@ QR_MIN_SIZE = 50
 MIN_AREA    = 500
 
 # ── Navigation ────────────────────────────────────────────────
-CORRIDOR_EDGE_THRESHOLD  = 50
-CORRIDOR_CENTER_TOLERANCE = 20
-CORRIDOR_TOLERANCE = 20
-GREEN_TOLERANCE    = 30
-QR_TOLERANCE       = 10
-STABLE_FRAMES      = 90
+CORRIDOR_EDGE_THRESHOLD  = 50     # used by detectors/corridor_nav.py
+CORRIDOR_TOLERANCE       = 20
 
 # ── Red zone failsafe ─────────────────────────────────────────
-RED_DANGER_AREA      = 5000
-MIN_RED_AREA         = 5000
-MIN_RED_SOLIDITY     = 0.70
-MIN_RED_ASPECT_RATIO = 0.40
-MAX_ESCAPE_TIME      = 5.0
+RED_DANGER_AREA      = 5000   # used by mission_logic.py override
+MIN_RED_AREA         = 5000   # used by detectors/red_zone.py
 
 # ── Template matcher ─────────────────────────────────────────
 MATCH_THRESHOLD  = 0.75
+SHARPNESS_THRESHOLD = 25.0     # Laplacian variance below this = blurry candidate
 TEMPLATE_SIZE    = (128, 128)
 CLAHE_LIMIT      = 2.0
 CLAHE_TILE_SIZE  = (8, 8)
 
-# ── Search grid (legacy) ──────────────────────────────────────
-GRID_SIZE = (10, 10)
-
-# ── Search planning (NEW) ─────────────────────────────────────
+# ── Search planning ───────────────────────────────────────────
 # All planning waypoints are in NORMALISED coordinates (0.0 → 1.0).
 # (0,0) = bottom-left of plot, (1,1) = top-right.
 PLAN_ENABLED           = True       # set False to disable planner entirely
@@ -68,7 +60,7 @@ PLAN_COLOR_PENDING     = (180, 180, 180)
 SAVE_FIRST_QR     = True
 SAVE_TEMPLATE_QR  = True
 SAVE_CANDIDATES   = True
-CANDIDATE_THROTTLE_SEC = 2.0        # min seconds between candidate saves
+CANDIDATE_THROTTLE_SEC = 1.0        # min seconds between candidate saves
 
 # ── Visual debug colors (BGR) ─────────────────────────────────
 COLOR_QR           = (255,   0, 255)
@@ -80,4 +72,6 @@ COLOR_TEXT         = (255, 255, 255)
 COLOR_FRAME_CENTER = (  0, 255, 255)
 COLOR_BBOX         = (255, 165,   0)
 COLOR_OBJ_CENTER   = (  0, 255,   0)
-COLOR_OFFSET_LINE  = (255,   0,   0)
+
+CONFIRM_WINDOW        = 5       # N frames in confirmation window
+CONFIRM_MIN_HITS      = 3       # M hits required → vibration tolerant

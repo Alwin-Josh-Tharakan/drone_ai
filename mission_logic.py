@@ -4,7 +4,9 @@ class MissionController:
                  'no_detection_count', 'RED_DANGER_AREA', 'CORRIDOR_CENTERED', 
                  'GREEN_CENTERED', 'QR_CENTERED', 'STABLE_FRAMES')
     
-    def __init__(self, target_qr="DROP_ZONE_A"):
+    def __init__(self, target_qr="DROP_ZONE_A", match_threshold=None):
+        # match_threshold kept for API compatibility with vision_combined.py;
+        # this controller decides purely on QR payload + detection geometry.
         self.state = "TAKEOFF"  # Start with takeoff
         self.prev_state = None
         self.target_qr = target_qr

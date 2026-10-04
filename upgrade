@@ -1,0 +1,114 @@
+================================================================
+QR MATCHING CONFIDENCE UPGRADE PLAN
+Goal : true target  -> confidence >= 0.90
+       wrong target -> confidence <= 0.60
+Status: PLANNED (not yet implemented)
+================================================================
+
+BASELINE PROBLEM
+----------------
+Confidence = module-grid bit agreement (29x29, best of 4 rotations),
+optionally averaged with NCC. But every QR of the same version shares
+fixed patterns (3 finder squares, separators, timing, alignment, format
+info ~ 1/3 of all modules), so a WRONG code still scores ~0.60-0.75,
+while a TRUE code caps at ~0.80-0.90 due to perspective/blur/sampling
+loss. The two score distributions overlap -> no clean 0.90/0.60 split.
+
+SECTION A - MAKE WRONG CODES SCORE LOWER (discriminability)
+-----------------------------------------------------------
+A1. Data-modules-only scoring (fixed-pattern mask)   [HIGHEST IMPACT]
+    Compare agreement only on data + error-correction modules; skip the
+    finder/timing/alignment/format regions shared by all QRs.
+    False scores fall to ~0.50 (chance); true stays ~0.95+.
+A2. Chance-corrected confidence
+    Report (agreement - chance)/(1 - chance): random code ~ 0, perfect = 1.
+A3. Version gate
+    Estimate candidate module count; if version != template version the
+    codes are provably different -> return confidence 0 immediately.
+A4. Format-info pre-check
+    Compare the 15-bit format region (mask pattern + EC level);
+    mismatch = hard reject. Cheap and very discriminative.
+A5. Metric gating instead of metric averaging
+    Pixel-sim and NCC are correlated and both inflated by fixed patterns.
+    Use module-grid agreement as primary score; NCC only as pass/fail
+    gate (take min of the two, not the mean).
+
+SECTION B - MAKE TRUE CODES SCORE HIGHER (geometric fidelity)
+-------------------------------------------------------------
+B1. Four-corner perspective warp                     [HIGH IMPACT]
+    minAreaRect fixes rotation only, not keystone skew. Use the detector's
+    4 corner points + homography to dewarp to a perfect square first.
+B2. Module-centre sampling
+    After warping to modules*k pixels, read each module at its centre (or
+    small centre window) instead of full-cell block means (edge bleed).
+B3. Rotate the grid, not the image
+    Do the 4-rotation search on the integer module matrix: zero
+    interpolation loss vs rotating pixel arrays.
+B4. Warp-quality gate
+    If corner reprojection error is high, mark frame "unstable" and skip
+    scoring instead of emitting a mediocre confidence.
+
+SECTION C - BINARIZATION FIDELITY
+---------------------------------
+C1. Module-scaled adaptive window
+    Threshold window ~ 2-3 modules in pixels, not a fixed 11 px (which can
+    sit inside one module and produce garbage thresholds).
+C2. Sauvola / Niblack thresholding
+    Handles shadows and uneven lighting better than adaptive Gaussian.
+C3. Two-binarization consensus
+    Binarize twice (e.g. Sauvola + Otsu); modules where they disagree are
+    "unknown" and excluded from scoring. Raises true, denies false luck.
+C4. Light morphological open/close
+    Removes salt-and-pepper sensor noise before sampling.
+C5. Keep template & candidate pipelines identical (already true - preserve).
+
+SECTION D - CAPTURE-SIDE QUALITY
+--------------------------------
+D1. Minimum pixels-per-module gate (>= 5 px/module); smaller = no score.
+D2. Shorter exposure + tighter sharpness gate (global shutter removes
+    rolling artifacts but NOT motion blur).
+D3. Reduce MJPG compression artifacts (YUYV/uncompressed if USB bandwidth
+    allows at working resolution).
+D4. Print & lighting control: matte print, no specular glare, even
+    illumination, full quiet zone.
+D5. Undistort before detection (already done - preserve).
+
+SECTION E - SEMANTIC HARD GATES
+-------------------------------
+E1. Decode-oracle fallback                           [HIGH IMPACT]
+    Decode the template image once at startup and store its text. Per
+    frame, if a candidate decodes: strings equal -> confidence 1.0,
+    different -> 0.0. Visual score used only when decode fails
+    (blur/damage/extreme angle). Perfect separation when readable.
+E2. Aspect & quiet-zone sanity gates before scoring
+    (non-square candidate -> reject).
+
+SECTION F - CALIBRATION & DECISION DESIGN
+-----------------------------------------
+F1. Labeled bench dataset
+    Collect true & false candidate crops across distances/angles/lighting
+    (candidate saves already exist in output tree).
+F2. Score histograms + ROC / max-margin analysis
+    Pick the operating point in the empty gap between the two clusters.
+F3. Monotonic calibration curve (piecewise-linear or logistic)
+    Maps raw score -> reported confidence so true lands > 0.90 and false
+    < 0.60 by construction.
+F4. Multi-frame evidence combination
+    Combine per-frame likelihoods multiplicatively: sustained true view
+    drives confidence to ~1.0; a single false flicker stays buried.
+
+IMPLEMENTATION PRIORITY
+-----------------------
+1. A1 + B1 + B2  -> expect true ~0.85 -> ~0.97, false ~0.70 -> ~0.50
+2. E1            -> perfect separation whenever the code is decodable
+3. A3 + A4       -> instant zeros for wrong codes
+4. F1 + F2 + F3  -> guarantees the 0.90 / 0.60 bands by measurement
+5. C* + D*       -> removes the tail of bad true frames
+6. A2, A5, B3, B4, E2, F4 -> polish & robustness
+
+EXPECTED OUTCOME AFTER STEPS 1-4
+--------------------------------
+Score distributions no longer overlap:
+  true  >= 0.90   (typically 0.95 - 0.99)
+  false <= 0.60   (typically 0.45 - 0.55, or hard 0.0 via gates)
+================================================================

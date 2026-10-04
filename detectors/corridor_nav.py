@@ -26,7 +26,13 @@ class CorridorNavigator:
         if center_line is None:
             return
         h, w = frame.shape[:2]
+        # Corridor edge lines + center line
         cv2.line(frame, (center_line, 0), (center_line, h), (255, 255, 0), 2)
+        cv2.line(frame, (w // 2, 0), (w // 2, h), (0, 255, 255), 1)
+        # Deviation arrow from frame center to corridor center (mid-height)
+        cy_arrow = h // 2
+        cv2.arrowedLine(frame, (w // 2, cy_arrow), (center_line, cy_arrow),
+                        (255, 255, 0), 2, tipLength=0.15)
         status = "C" if abs(deviation) < self.center_tolerance else (
             "R" if deviation > 0 else "L")
         cv2.putText(frame, f"{status}:{deviation:+d}", (10, h - 20),
