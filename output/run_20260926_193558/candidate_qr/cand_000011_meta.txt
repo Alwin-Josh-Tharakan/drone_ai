@@ -1,0 +1,8 @@
+{
+  "tag": "cand_000011",
+  "frame": 174,
+  "timestamp": "2026-09-26T19:36:55.732775",
+  "confidence": 0.7241,
+  "matched": false,
+  "sharpness": 506.5
+}
